@@ -29,9 +29,7 @@ jobs:
         
      - name: Publish the updated website page
         run: |
-          git config user.name "news-notifier-bot"
-          git config user.email "actions@github.com"
-          git add index.html
+         git add index.html
           git diff --quiet && git diff --staged --quiet || git commit -m "Update daily news page"
           git pull --rebase origin main
           git push
