@@ -1,8 +1,8 @@
+
 name: Daily News Website Update
 
 on:
   schedule:
-    # 10:30 UTC = 4:00 PM IST
     - cron: "30 10 * * *"
   workflow_dispatch:
 
@@ -16,20 +16,29 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Run news notifier script
+      - name: Build the news page
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python news_notifier.py
-        
-     - name: Publish the updated website page
+
+      - name: Publish the updated website page
         run: |
-         git add index.html
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update daily news page"
+          git config user.name "news-notifier-bot"
+          git config user.email "actions@github.com"
+          git add index.html
+          git diff --cached --quiet || git commit -m "Update daily news page"
           git pull --rebase origin main
           git push
+
+      - name: Send email notification
+        env:
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+        run: python news_notifier.py send-email
