@@ -22,12 +22,16 @@ testing.
 import html as html_lib
 import json
 import os
+import smtplib
+import sys
 import time
 import urllib.error
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 
 # India Standard Time (UTC+5:30)
@@ -158,6 +162,27 @@ MAX_ARTICLES_TO_ANALYZE = 1
 
 # Filename for the generated website page (used by GitHub Pages)
 OUTPUT_HTML_FILE = "index.html"
+
+# ---- EMAIL NOTIFICATION -----------------------------------------------
+# After each daily website update, a short email (website link, Executive
+# Summary and the HIGH-urgency items) is sent to everyone listed in EMAIL_TO.
+SEND_EMAIL_NOTIFICATION = True
+
+# One or more people to notify (add as many addresses as you like)
+EMAIL_TO = ["iniyaan24@gmail.com","slyth.sha25@gmail.com"]   # to add people: ["a@gmail.com", "b@gmail.com", "c@gmail.com"]
+
+# The Gmail account that SENDS the notification (can also be one of EMAIL_TO)
+EMAIL_FROM = "iniyaaniniyaan@gmail.com"
+
+# Gmail "App Password" (16 characters, from myaccount.google.com/apppasswords).
+# On GitHub this is read automatically from the Secret named EMAIL_APP_PASSWORD.
+EMAIL_APP_PASSWORD = os.environ.get("EMAIL_APP_PASSWORD", "PASTE_YOUR_GMAIL_APP_PASSWORD_HERE")
+
+# Your website address. Leave blank on GitHub - it is detected automatically.
+WEBSITE_URL = ""
+
+# Temporary file the update step leaves for the email step (not published)
+DIGEST_FILE = "email_digest.json"
 
 # =========================== END OF CONFIG ==============================
 
@@ -574,6 +599,156 @@ def main():
         f.write(html_page)
     print(f"Website page written to {OUTPUT_HTML_FILE}")
 
+    digest = build_digest(results_by_scope, executive_summary, window_start, shown_end, total_articles)
+    with open(DIGEST_FILE, "w", encoding="utf-8") as f:
+        json.dump(digest, f, ensure_ascii=False)
+    print(f"Email digest saved to {DIGEST_FILE}")
+
+
+def build_digest(results_by_scope, executive_summary, window_start, window_end, total_articles):
+    """Collect what the notification email needs: counts, executive summary, HIGH items."""
+    counts = {"High": 0, "Medium": 0, "Low": 0}
+    high_items = []
+    for scope, by_keyword in results_by_scope.items():
+        for label, analyzed in by_keyword.items():
+            for a in analyzed:
+                if a["urgency"] in counts:
+                    counts[a["urgency"]] += 1
+                if a["urgency"] == "High":
+                    high_items.append({
+                        "scope": scope, "heading": label, "title": a["title"],
+                        "link": a["link"], "source": a["source"], "analysis": a["analysis"],
+                    })
+    return {
+        "updated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+        "window": (
+            f"{window_start.astimezone(IST):%d %b, %I:%M %p} to "
+            f"{window_end.astimezone(IST):%d %b, %I:%M %p} IST"
+        ),
+        "total_articles": total_articles,
+        "counts": counts,
+        "executive_summary": executive_summary,
+        "high_items": high_items,
+    }
+
+
+def get_website_url():
+    """Use WEBSITE_URL if set; otherwise work it out from the GitHub repository name."""
+    if WEBSITE_URL.strip():
+        return WEBSITE_URL.strip()
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if "/" in repo:
+        owner, name = repo.split("/", 1)
+        return f"https://{owner.lower()}.github.io/{name}/"
+    return ""
+
+
+def build_email_content(d):
+    """Return (subject, plain_text, html) for the notification email."""
+    site_url = get_website_url()
+    es = d.get("executive_summary") or {}
+    counts = d.get("counts", {})
+    esc = html_lib.escape
+
+    subject = f"EC NEWS updated - {d['updated_at']}"
+    if es.get("overall_risk"):
+        subject += f" | Overall risk: {es['overall_risk']}"
+
+    t = ["EC NEWS has been updated.", ""]
+    if site_url:
+        t.append(f"Website: {site_url}")
+    t.append(f"News window: {d['window']}")
+    t.append(
+        f"Articles found: {d['total_articles']}  "
+        f"(AI-rated: {counts.get('High', 0)} High, {counts.get('Medium', 0)} Medium, {counts.get('Low', 0)} Low)"
+    )
+    if es:
+        t += ["", "EXECUTIVE SUMMARY"]
+        for i, kf in enumerate(es.get("key_findings", []), 1):
+            t.append(f"Key Finding {i}: {kf.get('finding', '')}")
+            t.append(f"  -> Implication: {kf.get('implication', '')}")
+        t.append(f"Overall risk: {es.get('overall_risk', '')} - {es.get('overall_risk_reason', '')}")
+    if d.get("high_items"):
+        t += ["", "HIGH-URGENCY ITEMS"]
+        for h in d["high_items"]:
+            t.append(f"* {h['title']} ({h['source']})")
+            t.append(f"  {h['link']}")
+            if h["analysis"]:
+                t.append(f"  {h['analysis']}")
+    text_body = "\n".join(t)
+
+    h = ['<div style="font-family:Arial,Segoe UI,sans-serif;max-width:640px;color:#1e293b">']
+    h.append('<h2 style="margin:0 0 6px">EC NEWS has been updated</h2>')
+    if site_url:
+        h.append(f'<p style="margin:0 0 12px"><a href="{esc(site_url)}" style="font-size:16px;font-weight:bold">Open the website</a></p>')
+    h.append(
+        f'<p style="margin:0 0 4px;color:#475569">News window: {esc(d["window"])}</p>'
+        f'<p style="margin:0 0 16px;color:#475569">Articles found: <b>{d["total_articles"]}</b> &middot; '
+        f'AI-rated: {counts.get("High", 0)} High, {counts.get("Medium", 0)} Medium, {counts.get("Low", 0)} Low</p>'
+    )
+    if es:
+        h.append('<h3 style="margin:16px 0 8px;color:#1d4ed8">EXECUTIVE SUMMARY</h3>')
+        for i, kf in enumerate(es.get("key_findings", []), 1):
+            h.append(
+                f'<p style="margin:0 0 2px"><b>Key Finding {i}:</b> {esc(kf.get("finding", ""))}</p>'
+                f'<p style="margin:0 0 10px 14px;color:#334155">&rarr; Implication: {esc(kf.get("implication", ""))}</p>'
+            )
+        h.append(
+            f'<p style="margin:10px 0 0"><b>Overall risk: {esc(es.get("overall_risk", ""))}</b> &mdash; '
+            f'{esc(es.get("overall_risk_reason", ""))}</p>'
+        )
+    if d.get("high_items"):
+        h.append('<h3 style="margin:20px 0 8px;color:#dc2626">HIGH-URGENCY ITEMS</h3>')
+        for item in d["high_items"]:
+            h.append(
+                f'<p style="margin:0 0 2px"><a href="{esc(item["link"])}"><b>{esc(item["title"])}</b></a> '
+                f'<span style="color:#64748b">({esc(item["source"])})</span></p>'
+            )
+            if item["analysis"]:
+                h.append(f'<p style="margin:0 0 10px 14px;color:#334155">{esc(item["analysis"])}</p>')
+    h.append("</div>")
+    return subject, text_body, "".join(h)
+
+
+def send_digest_email():
+    """Send the notification email (run AFTER the website has been updated)."""
+    if not SEND_EMAIL_NOTIFICATION:
+        print("Email notification is switched off (SEND_EMAIL_NOTIFICATION = False).")
+        return
+    if not os.path.exists(DIGEST_FILE):
+        print(f"{DIGEST_FILE} not found - run the news update first.")
+        raise SystemExit(1)
+    with open(DIGEST_FILE, encoding="utf-8") as f:
+        d = json.load(f)
+
+    recipients = EMAIL_TO if isinstance(EMAIL_TO, list) else [EMAIL_TO]
+    subject, text_body, html_body = build_email_content(d)
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = EMAIL_FROM
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.starttls()
+            server.login(EMAIL_FROM, EMAIL_APP_PASSWORD)
+            server.sendmail(EMAIL_FROM, recipients, msg.as_string())
+    except smtplib.SMTPAuthenticationError:
+        print(
+            "Gmail rejected the login. Check that EMAIL_FROM matches the account the "
+            "App Password was created for, and that the GitHub Secret EMAIL_APP_PASSWORD "
+            "holds a fresh 16-character App Password."
+        )
+        raise SystemExit(1)
+    print(f"Notification email sent to {len(recipients)} recipient(s).")
+
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "send-email":
+        send_digest_email()
+    else:
+        main()
+
