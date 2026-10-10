@@ -29,14 +29,16 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python news_notifier.py
 
+     
       - name: Publish the updated website page
         run: |
           git config user.name "news-notifier-bot"
           git config user.email "actions@github.com"
+          git pull --rebase origin main
           git add index.html
           git diff --cached --quiet || git commit -m "Update daily news page"
-          git pull --rebase origin main
           git push
+
 
       - name: Send email notification
         env:
